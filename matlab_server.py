@@ -5,6 +5,8 @@ import subprocess
 import sys
 from typing import Optional, Dict, Any
 from mcp.server.fastmcp import FastMCP, Image, Context
+import io
+from contextlib import redirect_stdout
 
 # Get MATLAB path from environment variable with default fallback
 MATLAB_PATH = os.getenv('MATLAB_PATH', '/Applications/MATLAB_R2024a.app')
@@ -109,18 +111,7 @@ def create_matlab_function(function_name: str, code: str) -> str:
 
 @mcp.tool()
 def execute_matlab_script(script_name: str, args: Optional[Dict[str, Any]] = None) -> dict:
-    """Execute a MATLAB script and return results.
-    
-    Args:
-        script_name: Name of the script (without .m extension)
-        args: Optional dictionary of arguments to pass to the script
-    
-    Returns:
-        Dictionary containing:
-        - output: Text output from MATLAB
-        - figures: List of figures generated (if any)
-        - workspace: Variables in MATLAB workspace after execution
-    """
+    """Execute a MATLAB script and return results."""
     script_path = MATLAB_DIR / f"{script_name}.m"
     if not script_path.exists():
         raise FileNotFoundError(f"Script {script_name}.m not found")
@@ -131,6 +122,9 @@ def execute_matlab_script(script_name: str, args: Optional[Dict[str, Any]] = Non
     # Clear previous figures
     eng.close('all', nargout=0)
     
+    # Create a temporary file for MATLAB output
+    temp_output_file = MATLAB_DIR / f"temp_output_{script_name}.txt"
+    
     # Execute the script
     result = {}
     try:
@@ -139,9 +133,24 @@ def execute_matlab_script(script_name: str, args: Optional[Dict[str, Any]] = Non
             matlab_args = {k: matlab.double([v]) if isinstance(v, (int, float)) else v 
                          for k, v in args.items()}
             eng.workspace['args'] = matlab_args
-            
-        output = eng.eval(script_name, nargout=0)
-        result['output'] = str(output) if output else ""
+        
+        # Set up diary to capture output
+        eng.eval(f"diary('{temp_output_file}')", nargout=0)
+        eng.eval(script_name, nargout=0)
+        eng.eval("diary off", nargout=0)
+        
+        # Read captured output
+        if temp_output_file.exists():
+            with open(temp_output_file, 'r') as f:
+                printed_output = f.read().strip()
+            # Clean up temp file
+            os.remove(temp_output_file)
+        else:
+            printed_output = "No output captured"
+        
+        result['printed_output'] = printed_output
+        
+        # Rest of your code for figures and workspace variables...
         
         # Capture figures if any were generated
         figures = []
@@ -163,13 +172,21 @@ def execute_matlab_script(script_name: str, args: Optional[Dict[str, Any]] = Non
         result['figures'] = figures
         
         # Get workspace variables
-        workspace = {}
         var_names = eng.eval('who', nargout=1)
         for var in var_names:
             if var != 'args':  # Skip the args we passed in
                 val = eng.workspace[var]
-                workspace[var] = str(val)
-        result['workspace'] = workspace
+                # Clean variable name for JSON compatibility
+                clean_var_name = var.strip().replace(' ', '_')       
+  
+                val_str = str(val)
+                # Truncate long values to prevent excessive output
+                max_length = 1000  # Maximum length for variable values
+                if len(val_str) > max_length:
+                    val_str = val_str[:max_length] + "... [truncated]"
+                
+                val = val_str  # Replace the original value with the string representation
+                result[clean_var_name] = val
         
     except Exception as e:
         raise RuntimeError(f"MATLAB execution error: {str(e)}")
@@ -177,18 +194,8 @@ def execute_matlab_script(script_name: str, args: Optional[Dict[str, Any]] = Non
     return result
 
 @mcp.tool()
-def call_matlab_function(function_name: str, *args: Any) -> dict:
-    """Call a MATLAB function with arguments.
-    
-    Args:
-        function_name: Name of the function (without .m extension)
-        *args: Arguments to pass to the function
-    
-    Returns:
-        Dictionary containing:
-        - output: Function return value(s)
-        - figures: List of figures generated (if any)
-    """
+def call_matlab_function(function_name: str, args: Any) -> dict:
+    """Call a MATLAB function with arguments."""
     function_path = MATLAB_DIR / f"{function_name}.m"
     if not function_path.exists():
         raise FileNotFoundError(f"Function {function_name}.m not found")
@@ -198,6 +205,9 @@ def call_matlab_function(function_name: str, *args: Any) -> dict:
     
     # Clear previous figures
     eng.close('all', nargout=0)
+    
+    # Create a temporary file for MATLAB output
+    temp_output_file = MATLAB_DIR / f"temp_output_{function_name}.txt"
     
     # Convert Python arguments to MATLAB types
     matlab_args = []
@@ -211,14 +221,28 @@ def call_matlab_function(function_name: str, *args: Any) -> dict:
     
     result = {}
     try:
+        # Set up diary to capture output
+        eng.eval(f"diary('{temp_output_file}')", nargout=0)
+        
         # Call the function
         output = getattr(eng, function_name)(*matlab_args)
-        if isinstance(output, matlab.double):
-            result['output'] = output.tolist()
-        else:
-            result['output'] = str(output)
         
-        # Capture figures if any were generated
+        # Turn off diary
+        eng.eval("diary off", nargout=0)
+        
+        # Read captured output
+        if temp_output_file.exists():
+            with open(temp_output_file, 'r') as f:
+                printed_output = f.read().strip()
+            # Clean up temp file
+            os.remove(temp_output_file)
+        else:
+            printed_output = "No output captured"
+            
+        result['output'] = str(output)
+        result['printed_output'] = printed_output
+        
+        # Capture figures - rest of your code remains the same
         figures = []
         fig_handles = eng.eval('get(groot, "Children")', nargout=1)
         if fig_handles:
