@@ -8,7 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
-matlab_scripts
+matlab_scripts/*
 *.png
 *.jpg
 .DS_Store
